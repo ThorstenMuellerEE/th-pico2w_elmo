@@ -523,7 +523,31 @@ def parse_form_data(request):
 def handle_config_update(request, ota_updater=None):
     """Handle configuration update from POST request."""
     try:
-        form_data = parse_form_data(request)
+        # If request is bytes, it's the raw body from the async handler
+        if isinstance(request, bytes):
+            try:
+                form_str = request.decode('utf-8')
+            except:
+                return "HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nInvalid request encoding"
+        else:
+            # Legacy support for string requests
+            form_str = request
+            # Find body if it includes headers
+            body_start = form_str.find("\r\n\r\n")
+            if body_start != -1:
+                form_str = form_str[body_start + 4:]
+        
+        # Parse the form data
+        from urllib.parse import unquote_plus
+        form_data = {}
+        if form_str:
+            pairs = form_str.split("&")
+            for pair in pairs:
+                if "=" in pair:
+                    key, value = pair.split("=", 1)
+                    form_data[unquote_plus(key)] = unquote_plus(value)
+        
+        print(f"CONFIG: Parsed form data with {len(form_data)} fields")
         log_info(f"Config update: {list(form_data.keys())}", "CONFIG")
 
         config = validate_config_input(form_data)
@@ -546,11 +570,12 @@ def handle_config_update(request, ota_updater=None):
             log_error("Failed to save configuration", "CONFIG")
             return "HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nFailed to save config"
     except Exception as e:
+        print(f"CONFIG: Update error - {e}")
         log_error(f"Config update failed: {e}", "CONFIG")
         return f"HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nConfig update failed: {e}"
 
 
-def handle_update_page(ota_updater=None):
+def handle_update_page(ota_updater=None, ota_check_result=None):
     """Display OTA update page with current status and update button."""
     try:
         # Get current OTA status
@@ -560,6 +585,52 @@ def handle_update_page(ota_updater=None):
         auto_check = ota_status.get("auto_check", False)
         repo = ota_status.get("repo", "unknown")
         branch = ota_status.get("branch", "unknown")
+
+        # Build check result section
+        check_result_html = ""
+        if ota_check_result:
+            has_update = ota_check_result.get('has_update', False)
+            latest_version = ota_check_result.get('latest_version', 'unknown')
+            current_ver = ota_check_result.get('current_version', 'unknown')
+            
+            if has_update:
+                check_result_html = f"""
+            <div class="status-info" style="border: 2px solid #ff6b6b; background: rgba(255, 107, 107, 0.1);">
+                <h2 style="color: #ff6b6b;">✓ New Update Available</h2>
+                <p><strong>Current Version:</strong> {current_ver}</p>
+                <p><strong>New Version:</strong> {latest_version}</p>
+                <form method="POST" action="/update_perform" style="margin-top: 15px;">
+                    <button type="submit" style="
+                        background-color: #ff6b6b;
+                        color: white;
+                        padding: 12px 24px;
+                        font-size: 1rem;
+                        border: none;
+                        border-radius: 5px;
+                        cursor: pointer;
+                        font-weight: bold;
+                        transition: all 0.3s ease;
+                    ">
+                        Update to {latest_version}
+                    </button>
+                </form>
+            </div>
+            """
+            else:
+                check_result_html = f"""
+            <div class="status-info" style="border: 2px solid #4CAF50; background: rgba(76, 175, 80, 0.15); box-shadow: 0 0 10px rgba(76, 175, 80, 0.3);">
+                <h2 style="color: #4CAF50; font-size: 1.3em;">✓ No Update Available</h2>
+                <p><strong>Current Version:</strong> {current_ver}</p>
+                <p style="color: #4CAF50; font-weight: bold; font-size: 1.05em;">Your device is running the latest available version</p>
+            </div>
+            """
+        else:
+            check_result_html = """
+            <div class="status-info" style="border: 2px solid #00d4ff; background: rgba(0, 212, 255, 0.1);">
+                <h2 style="color: #00d4ff;">ℹ️ Check Status</h2>
+                <p style="color: #00d4ff;">Click "Check for Updates" button below to query GitHub for new releases</p>
+            </div>
+            """
 
         html_content = f"""
         <div class="container">
@@ -573,6 +644,8 @@ def handle_update_page(ota_updater=None):
                 <p><strong>OTA Enabled:</strong> {"Yes" if ota_enabled else "No"}</p>
                 <p><strong>Auto-Update:</strong> {"Yes" if auto_check else "No"}</p>
             </div>
+
+            {check_result_html}
 
             <h2>Update Options</h2>
             <form method="POST" action="/update">
@@ -592,11 +665,10 @@ def handle_update_page(ota_updater=None):
             </form>
 
             <div class="status-info" style="margin-top: 20px;">
-                <h2>Update Log</h2>
-                <p>The update process will:</p>
+                <h2>Update Process</h2>
+                <p>When you perform an update, the system will:</p>
                 <ul>
-                    <li>Check GitHub for new releases</li>
-                    <li>Download firmware files</li>
+                    <li>Download firmware files from GitHub</li>
                     <li>Create backup of current files</li>
                     <li>Apply the update</li>
                     <li>Restart the device</li>

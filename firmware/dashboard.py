@@ -38,11 +38,25 @@ except ImportError:
     </div>
     """
 
-def dashboard_html():
+def dashboard_html(temperatures=None, wlan_obj=None, boot_ticks_val=None, ota_in_progress=False):
     print("Dashboard called.")
-    wifi = "OK" if wlan.isconnected() else "DOWN"
-    ip = wlan.ifconfig()[0] if wlan.isconnected() else "N/A"
-    uptime = time.ticks_diff(time.ticks_ms(), boot_ticks) // 1000
+    
+    # Handle None values
+    if temperatures is None:
+        temperatures = {}
+    if wlan_obj is None:
+        wifi = "DOWN"
+        ip = "N/A"
+    else:
+        wifi = "OK" if wlan_obj.isconnected() else "DOWN"
+        ip = wlan_obj.ifconfig()[0] if wlan_obj.isconnected() else "N/A"
+    
+    if boot_ticks_val is None:
+        import time
+        uptime = 0
+    else:
+        import time
+        uptime = time.ticks_diff(time.ticks_ms(), boot_ticks_val) // 1000
 
     rows = ""
     for name, value in temperatures.items():

@@ -127,6 +127,9 @@ except Exception as e:
 # ───────────────────────── SHARED STATE ─────────────────────────
 temperatures = {}
 boot_ticks = time.ticks_ms()
+ota_requested = False  # Flag to trigger OTA update
+ota_check_result = None  # Store check result: {'has_update': bool, 'latest_version': str, 'current_version': str}
+ota_in_progress = False  # Flag to prevent concurrent OTA operations
 
 # ───────────────────────── SENSOR TASK ─────────────────────────
 async def sensor_task():
@@ -152,6 +155,80 @@ async def sensor_task():
             log_error(f"Sensor error: {e}", "SENSOR")
 
         await asyncio.sleep(5)
+
+# ───────────────────────── OTA TASK ─────────────────────────
+async def ota_task():
+    global ota_requested, ota_in_progress
+    
+    print("OTA: Task started and monitoring...")
+
+    while True:
+        try:
+            # Debug: Show current state periodically
+            if ota_requested or ota_in_progress:
+                print(f"OTA: Task state - requested={ota_requested}, in_progress={ota_in_progress}")
+            
+            if ota_requested and not ota_in_progress:
+                ota_in_progress = True
+                ota_requested = False
+                print(f"OTA: Task activated - beginning update process")
+
+                try:
+                    if not ota_updater:
+                        print("OTA: ERROR - OTA updater not available")
+                        log_error("OTA updater not available", "OTA")
+                        ota_in_progress = False
+                        await asyncio.sleep(1)
+                        continue
+
+                    print("OTA: Starting update process...")
+                    log_info("OTA update started", "OTA")
+                    gc.collect()
+
+                    print("OTA: Checking for updates on GitHub...")
+                    has_update, new_version, release_data = ota_updater.check_for_updates()
+
+                    if not has_update:
+                        print("OTA: No update available")
+                        log_info("No OTA update available", "OTA")
+                        ota_in_progress = False
+                        continue
+
+                    print(f"OTA: Update found! Downloading version {new_version}...")
+                    log_info(f"Downloading version {new_version}", "OTA")
+                    success = ota_updater.download_update(new_version, None)
+                    if not success:
+                        print("OTA: Download failed!")
+                        raise RuntimeError("Download failed")
+
+                    print("OTA: Download successful, applying update...")
+                    gc.collect()
+
+                    print(f"OTA: Applying version {new_version}...")
+                    log_info("Applying update", "OTA")
+                    success = ota_updater.apply_update(new_version)
+                    if not success:
+                        print("OTA: Apply failed!")
+                        raise RuntimeError("Apply failed")
+
+                    print("OTA: Update successful! Rebooting in 2 seconds...")
+                    log_info("OTA successful, rebooting in 2s", "OTA")
+                    await asyncio.sleep(2)
+
+                    import machine
+                    machine.reset()
+
+                except Exception as e:
+                    print(f"OTA: ERROR - {e}")
+                    log_error(f"OTA failed: {e}", "OTA")
+                    ota_in_progress = False
+                    gc.collect()
+        except Exception as e:
+            print(f"OTA: Task error - {e}")
+            log_error(f"OTA task error: {e}", "OTA")
+            await asyncio.sleep(5)
+
+        await asyncio.sleep(1)
 
 # ───────────────────────── METRICS ─────────────────────────
 def format_metrics():
@@ -179,6 +256,7 @@ def format_metrics():
 
 # ───────────────────────── HTTP SERVER ─────────────────────────
 async def handle_client(reader, writer):
+    global ota_requested, ota_check_result, ota_in_progress
     print("handle_client called.")
     #print("reader: ", reader)
     #print("writer: ", writer)
@@ -213,9 +291,23 @@ async def handle_client(reader, writer):
         path = request.decode().split(" ")[1].split("?")[0]
         print("called path:", path)
         
-        # skip headers
-        while await reader.readline() != b"\r\n":
-            pass
+        # Read headers and capture Content-Length for POST requests
+        headers = {}
+        while True:
+            header_line = await reader.readline()
+            if header_line == b"\r\n":
+                break
+            header_str = header_line.decode().strip()
+            if ':' in header_str:
+                key, value = header_str.split(':', 1)
+                headers[key.strip().lower()] = value.strip()
+        
+        # Read body for POST requests
+        request_body = b""
+        if method == "POST":
+            content_length = int(headers.get('content-length', 0))
+            if content_length > 0:
+                request_body = await reader.readexactly(content_length)
                
         if method == "GET" and path == "/":
             system_info = get_system_info(wlan, boot_ticks)
@@ -235,7 +327,7 @@ async def handle_client(reader, writer):
             writer.write(response.encode())
 
         elif path == "/dashboard":
-            html = dashboard_html()
+            html = dashboard_html(temperatures, wlan, boot_ticks, ota_in_progress)
             writer.write(b"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n")
             writer.write(html.encode())
             
@@ -268,9 +360,10 @@ async def handle_client(reader, writer):
 
         elif method == "POST" and path == "/config_update":
             # Configuration update
+            print(f"CONFIG: Received POST request with body size: {len(request_body)} bytes")
             # TODO: enable ota_updater later
-            #response = handle_config_update(request, ota_updater)
-            response = handle_config_update(request)
+            #response = handle_config_update(request_body, ota_updater)
+            response = handle_config_update(request_body)
             writer.write(response)
 
         elif method == "GET" and path == "/logs":
@@ -280,16 +373,40 @@ async def handle_client(reader, writer):
 
         elif method == "GET" and path == "/update":
             # OTA update page endpoint
-            response = handle_update_page(ota_updater)
+            response = handle_update_page(ota_updater, ota_check_result)
             writer.write(response)
         
         elif method == "POST" and path == "/update":
-            # OTA update trigger endpoint
+            # OTA check and update endpoint
             if ota_updater:
-                ota_requested = True
+                # Check for updates
+                if not ota_in_progress:
+                    print("OTA: User requested update check...")
+                    has_update, latest_version, release_data = ota_updater.check_for_updates()
+                    ota_check_result = {
+                        'has_update': has_update,
+                        'latest_version': latest_version,
+                        'current_version': ota_updater.get_current_version()
+                    }
+                    print(f"OTA: Check complete - has_update={has_update}, latest={latest_version}")
+                    log_info(f"Update check: has_update={has_update}, latest={latest_version}", "OTA")
                 response = b"HTTP/1.0 302 Found\r\nLocation: /update\r\n\r\n"
             else:
                 response = b"HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nOTA updater not initialized"
+            writer.write(response)
+        
+        elif method == "POST" and path == "/update_perform":
+            # Perform actual update if available
+            if ota_updater and ota_check_result and ota_check_result.get('has_update') and not ota_in_progress:
+                ota_requested = True
+                print(f"OTA: User confirmed update to {ota_check_result.get('latest_version')} - starting download...")
+                print(f"OTA: Set ota_requested={ota_requested}, ota_in_progress={ota_in_progress}")
+                log_info("OTA update triggered by user", "OTA")
+                response = b"HTTP/1.0 302 Found\r\nLocation: /update\r\n\r\n"
+            else:
+                print("OTA: Update request rejected - no update available or update in progress")
+                print(f"OTA: Conditions - updater={ota_updater}, check_result={ota_check_result}, has_update={ota_check_result.get('has_update') if ota_check_result else 'N/A'}, in_progress={ota_in_progress}")
+                response = b"HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nNo update available or update in progress"
             writer.write(response)
                 
         else:
@@ -321,7 +438,7 @@ async def main():
 #    init_ota()
 
     asyncio.create_task(sensor_task())
-#    asyncio.create_task(ota_task())
+    asyncio.create_task(ota_task())
     await http_server()
 
 

@@ -102,14 +102,17 @@ class GitHubOTAUpdater:
 
         for attempt in range(retries):
             try:
+                print(f"OTA: HTTP Request attempt {attempt + 1}/{retries}: {url}")
                 log_debug(f"Request {attempt + 1}/{retries}: {url}", "OTA")
 
                 gc.collect()
                 response = urequests.get(url, headers=headers)
 
                 if response.status_code == 200:
+                    print(f"OTA: HTTP 200 OK - response received")
                     return True, response
                 else:
+                    print(f"OTA: HTTP {response.status_code} ERROR")
                     log_error(f"HTTP {response.status_code}", "OTA")
                     response.close()
 
@@ -117,19 +120,23 @@ class GitHubOTAUpdater:
                         return False, f"HTTP {response.status_code}"
 
                     if attempt < retries - 1:
+                        print(f"OTA: Retrying in 2s...")
                         time.sleep(2)
                         continue
                     else:
                         return False, f"HTTP {response.status_code}"
 
             except Exception as e:
+                print(f"OTA: Request exception - {e}")
                 log_error(f"Request failed: {e}", "OTA")
                 if attempt < retries - 1:
+                    print(f"OTA: Retrying in 2s...")
                     time.sleep(2)
                     continue
                 else:
                     return False, str(e)
 
+        print(f"OTA: All retries failed for {url}")
         return False, "All retries failed"
 
     def check_for_updates(self):
@@ -208,16 +215,27 @@ class GitHubOTAUpdater:
             # Ultra-aggressive memory management
             gc.collect()
             initial_mem = gc.mem_free()
+            
+            # Record start time and print message
+            start_time = time.time()
+            print(f"OTA: Download started - {filename} at {time.localtime(start_time)[:5]}")
+            print(f"OTA: URL: {url}")
+            print(f"OTA: Target dir: {target_dir}")
             log_debug(f"Ultra-minimal download {filename}, mem: {initial_mem}", "OTA")
 
             success, response_or_error = self._make_request(url)
             if not success:
+                print(f"OTA: Download FAILED - {filename}: {response_or_error}")
                 log_error(f"Download failed: {response_or_error}", "OTA")
                 return False
 
+            print(f"OTA: Response received, parsing content...")
             try:
                 target_path = f"{target_dir}/{filename}" if target_dir else filename
                 temp_path = f"{target_path}.tmp"
+                
+                print(f"OTA: Target path: {target_path}")
+                print(f"OTA: Temp path: {temp_path}")
 
                 # ULTRA-SMALL chunks - 256 bytes to prevent allocation failures
                 chunk_size = 256
@@ -225,14 +243,18 @@ class GitHubOTAUpdater:
 
                 content = response_or_error.text
                 content_size = len(content)
+                
+                print(f"OTA: Content size: {content_size} bytes")
 
                 # Quick validation
                 if content_size == 0:
+                    print(f"OTA: Download FAILED - {filename} is empty")
                     log_error(f"{filename} is empty", "OTA")
                     response_or_error.close()
                     return False
 
                 if content.strip().startswith('<!DOCTYPE html>'):
+                    print(f"OTA: Download FAILED - {filename} is error page")
                     log_error(f"{filename} is error page", "OTA")
                     response_or_error.close()
                     return False
@@ -240,6 +262,7 @@ class GitHubOTAUpdater:
                 response_or_error.close()
                 gc.collect()
 
+                print(f"OTA: Writing to file in chunks...")
                 # Write in ultra-small chunks with aggressive GC
                 with open(temp_path, "w") as f:
                     for i in range(0, content_size, chunk_size):
@@ -254,15 +277,19 @@ class GitHubOTAUpdater:
                         # GC every 512 bytes
                         if i % (chunk_size * 2) == 0:
                             gc.collect()
+                
+                print(f"OTA: Wrote {total_bytes} bytes, flushing...")
 
                 # Clear content and GC
                 del content
                 gc.collect()
 
+                print(f"OTA: Renaming temp file to final location...")
                 # Atomic rename
                 try:
                     os.rename(temp_path, target_path)
-                except OSError:
+                except OSError as e:
+                    print(f"OTA: Rename failed - {e}, trying removal first...")
                     try:
                         os.remove(target_path)
                     except OSError:
@@ -271,17 +298,25 @@ class GitHubOTAUpdater:
 
                 # Verify file exists
                 try:
-                    os.stat(target_path)
-                except OSError:
+                    stat_info = os.stat(target_path)
+                    print(f"OTA: File verified - size: {stat_info[6]} bytes")
+                except OSError as e:
+                    print(f"OTA: Download FAILED - {target_path} not created: {e}")
                     log_error(f"{target_path} not created", "OTA")
                     return False
 
                 gc.collect()
                 final_mem = gc.mem_free()
+                
+                # Calculate elapsed time and print completion message
+                elapsed_time = time.time() - start_time
+                end_time = time.localtime()
+                print(f"OTA: Download finished - {filename} ({total_bytes} bytes) in {elapsed_time:.1f}s at {end_time[:5]}")
                 log_info(f"Downloaded {filename} ({total_bytes} bytes, mem: {final_mem})", "OTA")
                 return True
 
             except Exception as e:
+                print(f"OTA: Download FAILED - Write error in {filename}: {e}")
                 log_error(f"Write failed {filename}: {e}", "OTA")
 
                 # Cleanup
@@ -293,16 +328,24 @@ class GitHubOTAUpdater:
                 return False
 
         except Exception as e:
+            print(f"OTA: Download FAILED - {filename}: {e}")
             log_error(f"Ultra-minimal download failed {filename}: {e}", "OTA")
             return False
 
     def download_file(self, filename, target_dir=""):
-        # Construct URL for firmware files
-        if filename in ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "version.txt", "web_interface.py"]:
+        # Construct URL for firmware files - all discovered files are from /firmware/
+        firmware_files = ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "version.txt", 
+                         "web_interface.py", "dashboard.py", "internal_temp.py", "ota_init.py", "ota_task.py", 
+                         "prom_discovery.py", "recovery.py", "system_info.py"]
+        
+        if filename in firmware_files:
             url = f"{self.raw_base}/{self.branch}/firmware/{filename}"
         else:
             url = f"{self.raw_base}/{self.branch}/{filename}"
 
+        print(f"OTA: Preparing to download: {filename}")
+        print(f"OTA: Base: {self.raw_base}, Branch: {self.branch}")
+        print(f"OTA: Full URL: {url}")
         log_info(f"Downloading {filename}", "OTA")
 
         # Always use ultra-minimal streaming
@@ -311,16 +354,19 @@ class GitHubOTAUpdater:
     def _discover_firmware_files(self):
         try:
             contents_url = f"{self.api_base}/contents/firmware"
+            print(f"OTA: Querying GitHub API: {contents_url}")
             success, response_or_error = self._make_request(contents_url)
 
             if not success:
                 # Fallback to essential files
+                print(f"OTA: GitHub API failed, using fallback file list")
                 return ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "web_interface.py", "version.txt"]
 
             try:
                 contents_data = response_or_error.json()
                 response_or_error.close()
             except Exception as e:
+                print(f"OTA: JSON parse failed - {e}, using fallback file list")
                 response_or_error.close()
                 return ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "web_interface.py", "version.txt"]
 
@@ -332,33 +378,43 @@ class GitHubOTAUpdater:
                     if (filename.endswith(".py") or filename == "version.txt") and filename != "secrets.py":
                         firmware_files.append(filename)
 
+            print(f"OTA: Discovered {len(firmware_files)} files from GitHub: {firmware_files}")
             log_info(f"Discovered {len(firmware_files)} files", "OTA")
             return firmware_files
 
         except Exception as e:
+            print(f"OTA: File discovery exception - {e}, using fallback file list")
             log_error(f"File discovery failed: {e}", "OTA")
             return ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "web_interface.py", "version.txt"]
 
     def download_update(self, version, release_info=None):
         try:
+            print(f"OTA: Starting download of all files for version {version}...")
+            print(f"OTA: Using temp directory: {self.temp_dir}")
             log_info(f"Starting staged download for {version}", "OTA")
 
             # Clean temp directory
             try:
+                print(f"OTA: Cleaning temp directory...")
                 for filename in os.listdir(self.temp_dir):
                     filepath = f"{self.temp_dir}/{filename}"
+                    print(f"OTA: Removing old file: {filepath}")
                     os.remove(filepath)
-            except OSError:
+            except OSError as e:
+                print(f"OTA: Could not clean temp dir (may not exist): {e}")
                 pass
 
             # Get files to download
+            print(f"OTA: Discovering firmware files to download...")
             files_to_download = self._discover_firmware_files()
             self.update_files = files_to_download
 
+            print(f"OTA: Will download {len(files_to_download)} files total: {files_to_download}")
             log_info(f"Staged download: {len(files_to_download)} files", "OTA")
 
             # Staged download: one file at a time with aggressive cleanup
             for i, filename in enumerate(files_to_download, 1):
+                print(f"OTA: File {i}/{len(files_to_download)}: {filename}")
                 log_info(f"Stage {i}/{len(files_to_download)}: {filename}", "OTA")
 
                 # Aggressive memory cleanup before each download
@@ -367,9 +423,11 @@ class GitHubOTAUpdater:
 
                 if not self.download_file(filename, self.temp_dir):
                     if filename == "version.txt":
+                        print(f"OTA: Skipping optional file {filename}")
                         log_warn(f"Skipping optional file {filename}", "OTA")
                         continue
                     else:
+                        print(f"OTA: FAILED - Could not download {filename}")
                         log_error(f"Failed to download {filename}", "OTA")
                         return False
 
@@ -381,10 +439,12 @@ class GitHubOTAUpdater:
                 # Brief pause for memory stabilization
                 time.sleep(0.3)
 
+            print(f"OTA: All files downloaded successfully - {len(files_to_download)} files")
             log_info(f"Staged download complete: {len(files_to_download)} files", "OTA")
             return True
 
         except Exception as e:
+            print(f"OTA: Download FAILED - {e}")
             log_error(f"Staged download failed: {e}", "OTA")
             return False
 
