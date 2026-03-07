@@ -15,6 +15,9 @@ class GitHubOTAUpdater:
     def __init__(self):
         log_info("Initializing minimal OTA updater", "OTA")
 
+        # Initialize version tag storage
+        self._current_version_tag = None
+
         # Load configuration from device config instead of hardcoding
         try:
             from device_config import get_ota_config
@@ -88,6 +91,31 @@ class GitHubOTAUpdater:
     def set_current_version(self, version):
         with open("version.txt", "w") as f:
             f.write(version)
+
+    def create_update_flag(self):
+        """Create a flag file indicating update is in progress (survives reboot)."""
+        try:
+            with open("update_in_progress.flag", "w") as f:
+                f.write("1")
+            log_info("Update flag created", "OTA")
+            return True
+        except Exception as e:
+            log_error(f"Failed to create update flag: {e}", "OTA")
+            return False
+
+    def clear_update_flag(self):
+        """Clear the update flag after successful boot."""
+        try:
+            import os
+            os.remove("update_in_progress.flag")
+            log_info("Update flag cleared", "OTA")
+            return True
+        except OSError:
+            # File didn't exist, that's fine
+            return True
+        except Exception as e:
+            log_warn(f"Failed to clear update flag: {e}", "OTA")
+            return False
 
     def _get_headers(self):
         return {
@@ -184,12 +212,16 @@ class GitHubOTAUpdater:
 
                     release_data = latest_release
                     latest_version = release_data["tag_name"]
+                    # Store the tag_name for use in download URL
+                    self._current_version_tag = latest_version
                     log_info(f"Found latest dev release: {latest_version}", "OTA")
                 else:
                     # Parse single latest release
                     release_data = response_or_error.json()
                     response_or_error.close()
                     latest_version = release_data["tag_name"]
+                    # Store the tag_name for use in download URL
+                    self._current_version_tag = latest_version
                     log_info(f"Found latest stable release: {latest_version}", "OTA")
 
             except Exception as e:
@@ -334,17 +366,23 @@ class GitHubOTAUpdater:
 
     def download_file(self, filename, target_dir=""):
         # Construct URL for firmware files - all discovered files are from /firmware/
+        # Use the version tag (e.g., v1.1.1) instead of branch name for release downloads
         firmware_files = ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "version.txt", 
                          "web_interface.py", "dashboard.py", "internal_temp.py", "ota_init.py", "ota_task.py", 
                          "prom_discovery.py", "recovery.py", "system_info.py"]
         
         if filename in firmware_files:
-            url = f"{self.raw_base}/{self.branch}/firmware/{filename}"
+            # Use version tag for download URL - this is critical for releases!
+            # The tag (e.g., v1.1.1) points to the exact commit, not the branch
+            download_ref = self._current_version_tag if self._current_version_tag else self.branch
+            url = f"{self.raw_base}/{download_ref}/firmware/{filename}"
         else:
-            url = f"{self.raw_base}/{self.branch}/{filename}"
+            download_ref = self._current_version_tag if self._current_version_tag else self.branch
+            url = f"{self.raw_base}/{download_ref}/{filename}"
 
         print(f"OTA: Preparing to download: {filename}")
-        print(f"OTA: Base: {self.raw_base}, Branch: {self.branch}")
+        print(f"OTA: Base: {self.raw_base}, Branch: {self.branch}, Version tag: {self._current_version_tag}")
+        print(f"OTA: Using download ref: {download_ref}")
         print(f"OTA: Full URL: {url}")
         log_info(f"Downloading {filename}", "OTA")
 
@@ -388,6 +426,7 @@ class GitHubOTAUpdater:
             return ["main.py", "config.py", "ota_updater.py", "device_config.py", "logger.py", "web_interface.py", "version.txt"]
 
     def download_update(self, version, release_info=None):
+        """Download all firmware files from GitHub. Returns True on success, False on failure."""
         try:
             print(f"OTA: Starting download of all files for version {version}...")
             print(f"OTA: Using temp directory: {self.temp_dir}")
@@ -412,7 +451,13 @@ class GitHubOTAUpdater:
             print(f"OTA: Will download {len(files_to_download)} files total: {files_to_download}")
             log_info(f"Staged download: {len(files_to_download)} files", "OTA")
 
+            if not files_to_download:
+                log_error("No files to download!", "OTA")
+                print("OTA: ERROR - No files to download!")
+                return False
+
             # Staged download: one file at a time with aggressive cleanup
+            failed_downloads = []
             for i, filename in enumerate(files_to_download, 1):
                 print(f"OTA: File {i}/{len(files_to_download)}: {filename}")
                 log_info(f"Stage {i}/{len(files_to_download)}: {filename}", "OTA")
@@ -429,7 +474,9 @@ class GitHubOTAUpdater:
                     else:
                         print(f"OTA: FAILED - Could not download {filename}")
                         log_error(f"Failed to download {filename}", "OTA")
-                        return False
+                        failed_downloads.append(filename)
+                        # Continue trying other files
+                        continue
 
                 # Immediate cleanup after each file
                 gc.collect()
@@ -438,6 +485,20 @@ class GitHubOTAUpdater:
 
                 # Brief pause for memory stabilization
                 time.sleep(0.3)
+
+            # Check if critical files failed to download
+            critical_files = ["main.py", "config.py", "ota_updater.py"]
+            critical_failed = [f for f in failed_downloads if f in critical_files]
+            
+            if critical_failed:
+                log_error(f"Critical files failed to download: {critical_failed}", "OTA")
+                print(f"OTA: CRITICAL ERROR - Failed to download: {critical_failed}")
+                return False
+            
+            if failed_downloads:
+                log_warn(f"Some optional files failed to download: {failed_downloads}", "OTA")
+                print(f"OTA: Warning - some optional files failed: {failed_downloads}")
+                # Continue anyway - non-critical files failed
 
             print(f"OTA: All files downloaded successfully - {len(files_to_download)} files")
             log_info(f"Staged download complete: {len(files_to_download)} files", "OTA")
@@ -496,7 +557,7 @@ class GitHubOTAUpdater:
                 try:
                     os.stat(temp_path)
 
-                    # Basic validation - check file is not empty and not HTML error page
+                    # Basic validation - check file is not empty
                     with open(temp_path, "r") as f:
                         content = f.read()
 
@@ -504,15 +565,41 @@ class GitHubOTAUpdater:
                         log_error(f"{filename} too small ({len(content)} bytes)", "OTA")
                         return False
 
-                    if content.strip().startswith('<!DOCTYPE html>'):
+                    # Check for HTML error pages - only if file starts with HTML
+                    # This distinguishes actual error pages from files containing HTML in strings
+                    stripped = content.strip()
+                    if stripped.startswith('<!DOCTYPE html>') or stripped.startswith('<!DOCTYPE'):
                         log_error(f"{filename} is HTML error page", "OTA")
                         return False
 
-                    # Check for imports, but exclude configuration files that don't need them
-                    if filename.endswith('.py') and filename not in ['config.py', 'secrets.py']:
-                        if 'import' not in content:
-                            log_error(f"{filename} missing imports", "OTA")
-                            return False
+                    # For Python files, check for Python indicators (not HTML in strings)
+                    if filename.endswith('.py'):
+                        # Check if it's a legitimate Python file by looking for Python indicators
+                        # at the start of the file (not in strings)
+                        has_python_indicator = (
+                            stripped.startswith('"""') or  # Docstring
+                            stripped.startswith("'''") or  # Docstring
+                            stripped.startswith('import ') or
+                            stripped.startswith('from ')
+                        )
+                        
+                        # Also check for web_interface.py specifically - it legitimately contains
+                        # HTML templates in Python strings, so we need special handling
+                        if filename == "web_interface.py":
+                            # web_interface.py is a valid Python file with HTML in strings
+                            # Just verify it has Python code structure
+                            if 'def ' in content and ('import ' in content or '"""' in content):
+                                log_info(f"Validated {filename} ({len(content)} bytes)", "OTA")
+                                continue
+                            else:
+                                log_error(f"{filename} missing Python code structure", "OTA")
+                                return False
+                        
+                        # For other Python files, check for imports
+                        if filename not in ['config.py', 'secrets.py']:
+                            if 'import' not in content and not has_python_indicator:
+                                log_error(f"{filename} missing imports", "OTA")
+                                return False
 
                     log_info(f"Validated {filename} ({len(content)} bytes)", "OTA")
 
@@ -527,20 +614,33 @@ class GitHubOTAUpdater:
             return False
 
     def apply_update(self, version):
+        """
+        Apply the downloaded update to the device.
+        Returns True on success, False on failure.
+        On failure, automatically triggers rollback.
+        """
         try:
             log_info(f"Applying update to {version}", "OTA")
+            print(f"OTA: Applying update to version {version}...")
 
             # Step 1: Create backups of existing files
             if not self.create_backup(self.update_files):
                 log_warn("Backup creation failed, proceeding anyway", "OTA")
+                print("OTA: Warning - backup creation failed, proceeding anyway")
 
             # Step 2: Validate downloaded files
             if not self.validate_update_files():
                 log_error("File validation failed, aborting update", "OTA")
+                print("OTA: File validation FAILED - aborting update!")
+                
+                # Trigger rollback since validation failed
+                log_info("Initiating rollback due to validation failure", "OTA")
+                self.rollback_update()
                 return False
 
             # Step 3: Apply updates with error handling
             updated_files = []
+            errors = []
             for filename in self.update_files:
                 temp_path = f"{self.temp_dir}/{filename}"
                 try:
@@ -554,15 +654,26 @@ class GitHubOTAUpdater:
 
                     updated_files.append(filename)
                     log_info(f"Updated {filename}", "OTA")
-                except OSError:
-                    log_warn(f"Skipping missing {filename}", "OTA")
+                    print(f"OTA: Updated {filename}")
+                except OSError as oe:
+                    errors.append(f"{filename}: {oe}")
+                    log_warn(f"Skipping missing {filename}: {oe}", "OTA")
+                except Exception as e:
+                    errors.append(f"{filename}: {e}")
+                    log_error(f"Failed to update {filename}: {e}", "OTA")
 
             # Step 4: Update version only if files were updated
             if updated_files:
                 self.set_current_version(version)
                 log_info(f"Updated {len(updated_files)} files to version {version}", "OTA")
+                print(f"OTA: Updated {len(updated_files)} files to version {version}")
             else:
                 log_error("No files were updated", "OTA")
+                print("OTA: ERROR - No files were updated!")
+                
+                # Trigger rollback
+                log_info("Initiating rollback due to no files updated", "OTA")
+                self.rollback_update()
                 return False
 
             # Step 5: Clean temp directory
@@ -574,10 +685,16 @@ class GitHubOTAUpdater:
                 pass
 
             log_info(f"Update to {version} completed successfully", "OTA")
+            print(f"OTA: Update to {version} completed successfully!")
             return True
 
         except Exception as e:
             log_error(f"Apply failed: {e}", "OTA")
+            print(f"OTA: Apply FAILED - {e}")
+            
+            # Trigger rollback on any exception
+            log_info("Initiating rollback due to exception", "OTA")
+            self.rollback_update()
             return False
 
     def rollback_update(self):
@@ -618,11 +735,15 @@ class GitHubOTAUpdater:
 
     def perform_update(self):
         try:
+            # Create update flag FIRST - this survives reboot and signals rollback on failure
+            self.create_update_flag()
+            
             # Check for updates
             has_update, new_version, release_info = self.check_for_updates()
 
             if not has_update:
                 log_info("No updates available", "OTA")
+                self.clear_update_flag()  # Clear flag since no update happened
                 return False
 
             log_info(f"Update available: {new_version}", "OTA")
@@ -630,19 +751,24 @@ class GitHubOTAUpdater:
             # Download update
             if not self.download_update(new_version):
                 log_error("Download failed", "OTA")
+                self.clear_update_flag()  # Clear flag since download failed
                 return False
 
             # Apply update
             if not self.apply_update(new_version):
                 log_error("Apply failed", "OTA")
+                self.clear_update_flag()  # Clear flag since apply failed
                 return False
 
+            # Flag remains set - device will boot into new firmware
+            # If boot fails, main.py will detect flag and rollback
             log_info("Update completed, restarting...", "OTA")
             gc.collect()
             machine.reset()
 
         except Exception as e:
             log_error(f"Update failed: {e}", "OTA")
+            self.clear_update_flag()  # Clear flag on any exception
             return False
 
     def get_update_status(self):

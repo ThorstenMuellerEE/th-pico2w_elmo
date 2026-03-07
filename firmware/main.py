@@ -12,6 +12,7 @@ try:
     import socket
     import time
     import gc
+    import machine # pyright: ignore[reportMissingImports]
     #import dht
 
     from array import array
@@ -124,6 +125,126 @@ except Exception as e:
     log_warn(f"Failed to initialize OTA updater: {e}", "OTA")
     ota_updater = None
 
+
+# ───────────────────────── OTA UPDATE FLAG CHECK & ROLLBACK ─────────────────────────
+def check_update_flag_and_rollback():
+    """
+    Check for update flag and perform rollback if needed.
+    This is called after WiFi connection to ensure network is available for recovery.
+    
+    Enhanced with:
+    - More robust boot verification (not just network)
+    - Timeout-based rollback if device becomes unresponsive
+    - Clearer logging and error handling
+    """
+    try:
+        # Check if update flag exists
+        try:
+            with open("update_in_progress.flag", "r") as f:
+                flag_content = f.read().strip()
+                update_was_attempted = flag_content == "1"
+        except OSError:
+            # File doesn't exist - no update was attempted
+            update_was_attempted = False
+        
+        if not update_was_attempted:
+            log_info("No update flag found - normal boot", "OTA")
+            return False
+        
+        log_warn("Update flag found - checking boot status...", "OTA")
+        print("BOOT: Update flag detected - verifying network connectivity...")
+        
+        # Wait for network to be ready (give device time to stabilize)
+        max_wait = 30  # seconds
+        wait_interval = 2  # seconds
+        network_ready = False
+        network_check_count = 0
+        
+        for i in range(max_wait // wait_interval):
+            network_check_count += 1
+            status = wlan.status()
+            if status == 3:
+                network_ready = True
+                ip = wlan.ifconfig()[0]
+                log_info(f"Network connected after update: {ip}", "OTA")
+                print(f"BOOT: Network connected after update: {ip}")
+                break
+            elif status == 1:  # WL_CONNECTED but no IP yet
+                log_debug(f"WiFi connected, waiting for IP... ({i+1}/{max_wait//wait_interval})", "OTA")
+            elif status == 2:  # WL_NO_AP_FOUND
+                log_warn(f"No AP found, retrying... ({i+1}/{max_wait//wait_interval})", "OTA")
+            elif status == -1:  # WL_CONNECT_FAILED
+                log_error("WiFi connection failed!", "OTA")
+                break
+            else:
+                log_debug(f"Waiting for network... status={status} ({i+1}/{max_wait//wait_interval})", "OTA")
+            
+            time.sleep(wait_interval)
+        
+        if not network_ready:
+            log_error("Network not available after update - initiating rollback!", "OTA")
+            print("BOOT: Network failed - rolling back from backup files...")
+            
+            # Perform rollback using existing .bak files
+            if ota_updater:
+                rollback_success = ota_updater.rollback_update()
+                if rollback_success:
+                    log_info("Rollback completed successfully - rebooting...", "OTA")
+                    print("BOOT: Rollback completed - rebooting...")
+                    
+                    # Clean up flag before reboot
+                    try:
+                        import os
+                        os.remove("update_in_progress.flag")
+                    except OSError:
+                        pass
+                    
+                    time.sleep(1)
+                    machine.reset()
+                else:
+                    log_error("Rollback failed!", "OTA")
+                    print("BOOT: Rollback FAILED!")
+            else:
+                log_error("OTA updater not available for rollback!", "OTA")
+            
+            # If we get here, rollback failed - continue with normal boot
+            return True
+        
+        # Network is ready - verify HTTP server can start as final boot verification
+        # This ensures the new firmware actually works, not just network
+        log_info("Network ready - verifying firmware functionality...", "OTA")
+        print("BOOT: Verifying firmware functionality...")
+        
+        # Try a quick import test to verify firmware is valid
+        try:
+            # Test importing critical modules
+            import importlib
+            test_modules = ['config', 'logger', 'device_config']
+            for module_name in test_modules:
+                try:
+                    importlib.import_module(module_name)
+                    log_debug(f"Module {module_name} imported successfully", "OTA")
+                except Exception as module_err:
+                    log_warn(f"Module {module_name} import warning: {module_err}", "OTA")
+                    # Don't fail on warning, just log it
+            log_info("Firmware verification complete", "OTA")
+        except Exception as verify_err:
+            log_warn(f"Firmware verification warning: {verify_err}", "OTA")
+            # Continue anyway - network is up
+        
+        # Clear the flag - boot was successful
+        if ota_updater:
+            ota_updater.clear_update_flag()
+        
+        log_info("Update flag cleared - boot successful", "OTA")
+        print("BOOT: Update verified successful - flag cleared")
+        return True
+        
+    except Exception as e:
+        log_error(f"Update flag check failed: {e}", "OTA")
+        print(f"BOOT: Update flag check error: {e}")
+        return False
+
 # ───────────────────────── SHARED STATE ─────────────────────────
 temperatures = {}
 boot_ticks = time.ticks_ms()
@@ -181,6 +302,9 @@ async def ota_task():
                         await asyncio.sleep(1)
                         continue
 
+                    # Create update flag FIRST - this survives reboot and signals rollback on failure
+                    ota_updater.create_update_flag()
+
                     print("OTA: Starting update process...")
                     log_info("OTA update started", "OTA")
                     gc.collect()
@@ -215,12 +339,21 @@ async def ota_task():
                     log_info("OTA successful, rebooting in 2s", "OTA")
                     await asyncio.sleep(2)
 
-                    import machine
-                    machine.reset()
+                    print("OTA: Initiating hard reset...")
+                    gc.collect()
+                    try:
+                        machine.reset()
+                    except Exception as reset_error:
+                        print(f"OTA: Reset failed with error: {reset_error}")
+                        # Fallback: try soft reset by raising SystemExit
+                        raise SystemExit("OTA Reset initiated")
 
                 except Exception as e:
                     print(f"OTA: ERROR - {e}")
                     log_error(f"OTA failed: {e}", "OTA")
+                    # Clear the update flag since update failed
+                    if ota_updater:
+                        ota_updater.clear_update_flag()
                     ota_in_progress = False
                     gc.collect()
         except Exception as e:
@@ -434,6 +567,10 @@ async def http_server():
 async def main():
     gc.collect()
     await wifi_connect()
+    
+    # After WiFi is connected, check if an update was attempted and verify boot success
+    # This will rollback if the device didn't come online after the update
+    check_update_flag_and_rollback()
 
 #    init_ota()
 

@@ -100,17 +100,26 @@ def handle_firmware_download():
             import ujson
             with open('device_config.json', 'r') as f:
                 config = ujson.load(f)
-            branch = config.get('ota', {}).get('github_repo', {}).get('branch', 'main')
-            print(f"RECOVERY: Using branch: {branch}")
-        except:
+            ota_config = config.get('ota', {})
+            github_repo = ota_config.get('github_repo', {})
+            branch = github_repo.get('branch', 'main')
+            repo_owner = github_repo.get('owner', 'ThorstenMuellerEE')
+            repo_name = github_repo.get('name', 'th-pico2w_elmo')
+            print(f"RECOVERY: Using repo: {repo_owner}/{repo_name}, branch: {branch}")
+        except Exception as e:
+            # Fallback to default values
             branch = 'main'
-            print("RECOVERY: Using default branch: main")
+            repo_owner = 'ThorstenMuellerEE'
+            repo_name = 'th-pico2w_elmo'
+            print(f"RECOVERY: Using default repo: {repo_owner}/{repo_name}, branch: {branch} (error: {e})")
 
         import urequests
+        import os
 
         # Step 1: Discover all firmware files using GitHub API
         print("RECOVERY: Discovering firmware files...")
-        contents_url = f"https://api.github.com/repos/TerrifiedBug/pico-w-prometheus-dht22/contents/firmware?ref={branch}"
+        contents_url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/contents/firmware?ref={branch}"
+        print(f"RECOVERY: API URL: {contents_url}")
 
         try:
             response = urequests.get(contents_url)
@@ -138,21 +147,37 @@ def handle_firmware_download():
             files = ["main.py", "web_interface.py", "ota_updater.py", "device_config.py", "logger.py", "config.py", "recovery.py", "version.txt"]
 
         # Step 2: Download all discovered files
-        base_url = f"https://raw.githubusercontent.com/TerrifiedBug/pico-w-prometheus-dht22/{branch}/firmware/"
+        base_url = f"https://raw.githubusercontent.com/{repo_owner}/{repo_name}/{branch}/firmware/"
+        print(f"RECOVERY: Base URL: {base_url}")
         success_count = 0
         failed_files = []
 
         for filename in files:
             try:
                 print(f"RECOVERY: Downloading {filename}")
-                response = urequests.get(base_url + filename)
+                url = base_url + filename
+                response = urequests.get(url)
                 if response.status_code == 200:
+                    # Create backup first
+                    backup_name = f"{filename}.bak"
+                    try:
+                        # Try to create backup of existing file
+                        with open(filename, 'r') as src:
+                            backup_content = src.read()
+                        with open(backup_name, 'w') as dst:
+                            dst.write(backup_content)
+                        print(f"RECOVERY: Created backup: {backup_name}")
+                    except Exception as backup_err:
+                        print(f"RECOVERY: Could not create backup (file may not exist): {backup_err}")
+                    
+                    # Write new file
                     with open(filename, 'w') as f:
                         f.write(response.text)
                     success_count += 1
                     print(f"RECOVERY: Downloaded {filename}")
                 else:
                     failed_files.append(f"{filename} (HTTP {response.status_code})")
+                    print(f"RECOVERY: Failed to download {filename}: HTTP {response.status_code}")
                 response.close()
             except Exception as e:
                 failed_files.append(f"{filename} ({e})")
