@@ -1,0 +1,1 @@
+{"device": {"location": "home", "name": "default-device", "description": ""}, "ota": {"enabled": true, "auto_update": true, "update_interval": 1.0, "github_repo": {"owner": "ThorstenMuellerEE", "name": "th-pico2w_elmo", "branch": "main"}}, "last_updated": "1772885647"}

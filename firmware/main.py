@@ -42,6 +42,9 @@ try:
     
     from system_info import get_system_info
 
+    # Import OTA updater
+    from ota_updater import GitHubOTAUpdater
+
     # Import web interface functions
     from web_interface import (
         handle_start_page,
@@ -51,6 +54,7 @@ try:
         handle_config_page,
         handle_config_update,
         handle_logs_page,
+        handle_update_page,
     )
     
     print("BOOT: All modules loaded successfully")
@@ -110,6 +114,15 @@ DS_LABELS = {
 }
 
 log_info(f"Found {len(DS_ROMS)} DS18B20 sensors", "SENSOR")
+
+# ───────────────────────── OTA UPDATER ─────────────────────────
+ota_updater = None
+try:
+    ota_updater = GitHubOTAUpdater()
+    log_info("OTA updater initialized", "OTA")
+except Exception as e:
+    log_warn(f"Failed to initialize OTA updater: {e}", "OTA")
+    ota_updater = None
 
 # ───────────────────────── SHARED STATE ─────────────────────────
 temperatures = {}
@@ -265,13 +278,19 @@ async def handle_client(reader, writer):
             response = handle_logs_page(request)
             writer.write(response)
 
-        # TODO: activate OTA update handling later     
-        # elif path == "/update":
-        #     if ota_in_progress:
-        #         writer.write(b"HTTP/1.0 200 OK\r\n\r\nUpdate already running\n")
-        #     else:
-        #         ota_requested = True
-        #         writer.write(b"HTTP/1.0 200 OK\r\n\r\nOTA update started\n")
+        elif method == "GET" and path == "/update":
+            # OTA update page endpoint
+            response = handle_update_page(ota_updater)
+            writer.write(response)
+        
+        elif method == "POST" and path == "/update":
+            # OTA update trigger endpoint
+            if ota_updater:
+                ota_requested = True
+                response = b"HTTP/1.0 302 Found\r\nLocation: /update\r\n\r\n"
+            else:
+                response = b"HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nOTA updater not initialized"
+            writer.write(response)
                 
         else:
             writer.write(b"HTTP/1.0 404 Not Found\r\n\r\n")

@@ -548,3 +548,85 @@ def handle_config_update(request, ota_updater=None):
     except Exception as e:
         log_error(f"Config update failed: {e}", "CONFIG")
         return f"HTTP/1.0 400 Bad Request\r\nContent-Type: text/plain\r\n\r\nConfig update failed: {e}"
+
+
+def handle_update_page(ota_updater=None):
+    """Display OTA update page with current status and update button."""
+    try:
+        # Get current OTA status
+        ota_status = ota_updater.get_update_status() if ota_updater else {}
+        current_version = ota_status.get("current_version", "unknown")
+        ota_enabled = ota_status.get("ota_enabled", False)
+        auto_check = ota_status.get("auto_check", False)
+        repo = ota_status.get("repo", "unknown")
+        branch = ota_status.get("branch", "unknown")
+
+        html_content = f"""
+        <div class="container">
+            <h1>OTA Update Center</h1>
+            
+            <div class="status-info">
+                <h2>Current Status</h2>
+                <p><strong>Current Version:</strong> {current_version}</p>
+                <p><strong>Repository:</strong> {repo}</p>
+                <p><strong>Branch:</strong> {branch}</p>
+                <p><strong>OTA Enabled:</strong> {"Yes" if ota_enabled else "No"}</p>
+                <p><strong>Auto-Update:</strong> {"Yes" if auto_check else "No"}</p>
+            </div>
+
+            <h2>Update Options</h2>
+            <form method="POST" action="/update">
+                <button type="submit" style="
+                    background-color: #00d4ff;
+                    color: #1a1a2e;
+                    padding: 10px 20px;
+                    font-size: 1rem;
+                    border: none;
+                    border-radius: 5px;
+                    cursor: pointer;
+                    font-weight: bold;
+                    transition: all 0.3s ease;
+                ">
+                    Check for Updates
+                </button>
+            </form>
+
+            <div class="status-info" style="margin-top: 20px;">
+                <h2>Update Log</h2>
+                <p>The update process will:</p>
+                <ul>
+                    <li>Check GitHub for new releases</li>
+                    <li>Download firmware files</li>
+                    <li>Create backup of current files</li>
+                    <li>Apply the update</li>
+                    <li>Restart the device</li>
+                </ul>
+            </div>
+
+            {get_nav_links()}
+        </div>
+        """
+
+        response = f"HTTP/1.0 200 OK\r\nContent-Type: text/html\r\n\r\n" + \
+                   f"<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><title>OTA Update</title>" + \
+                   f"<style>{UNIFIED_CSS}</style></head><body>" + \
+                   html_content + \
+                   "</body></html>"
+        
+        return response.encode() if isinstance(response, str) else response
+    except Exception as e:
+        log_error(f"Update page rendering failed: {e}", "UPDATE")
+        return f"HTTP/1.0 500 Internal Server Error\r\nContent-Type: text/plain\r\n\r\nUpdate page error: {e}"
+
+
+def get_nav_links():
+    """Return navigation links for all pages."""
+    return """
+    <div class="nav-links">
+        <a href="/">Dashboard</a> |
+        <a href="/config">Config</a> |
+        <a href="/logs">Logs</a> |
+        <a href="/update">Update</a> |
+        <a href="/metrics">Metrics</a>
+    </div>
+    """

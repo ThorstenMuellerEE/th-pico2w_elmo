@@ -21,8 +21,8 @@ DEFAULT_CONFIG = {
         "auto_update": True,
         "update_interval": 1.0,
         "github_repo": {
-            "owner": "ThorstenMueller",
-            "name": "pico-w-prometheus-ds18b20",
+            "owner": "ThorstenMuellerEE",
+            "name": "th-pico2w_elmo",
             "branch": "main"
         }
     },
@@ -182,8 +182,8 @@ def validate_config_input(form_data):
         "auto_update": current_ota.get("auto_update", True),
         "update_interval": current_ota.get("update_interval", 1.0),
         "github_repo": {
-            "owner": current_ota.get("github_repo", {}).get("owner", "ThorstenMueller"),
-            "name": current_ota.get("github_repo", {}).get("name", "pico-w-prometheus-ds18b20"),
+            "owner": current_ota.get("github_repo", {}).get("owner", "ThorstenMuellerEE"),
+            "name": current_ota.get("github_repo", {}).get("name", "th-pico2w_elmo"),
             "branch": current_ota.get("github_repo", {}).get("branch", "main")
         }
     }

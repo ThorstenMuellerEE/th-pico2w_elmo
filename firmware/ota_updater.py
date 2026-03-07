@@ -21,16 +21,16 @@ class GitHubOTAUpdater:
             ota_config = get_ota_config()
             github_repo = ota_config.get("github_repo", {})
 
-            self.repo_owner = github_repo.get("owner", "TerrifiedBug")
-            self.repo_name = github_repo.get("name", "pico-w-prometheus-dht22")
+            self.repo_owner = github_repo.get("owner", "ThorstenMuellerEE")
+            self.repo_name = github_repo.get("name", "th-pico2w_elmo")
             self.branch = github_repo.get("branch", "main")
 
             log_info(f"OTA config loaded: {self.repo_owner}/{self.repo_name} (branch: {self.branch})", "OTA")
         except Exception as e:
             # Fallback to hardcoded values if config fails
             log_warn(f"Failed to load OTA config, using defaults: {e}", "OTA")
-            self.repo_owner = "TerrifiedBug"
-            self.repo_name = "pico-w-prometheus-dht22"
+            self.repo_owner = "ThorstenMuellerEE"
+            self.repo_name = "th-pico2w_elmo"
             self.branch = "main"
 
         # GitHub URLs
@@ -61,8 +61,8 @@ class GitHubOTAUpdater:
             github_repo = ota_config.get("github_repo", {})
 
             old_branch = self.branch
-            self.repo_owner = github_repo.get("owner", "TerrifiedBug")
-            self.repo_name = github_repo.get("name", "pico-w-prometheus-dht22")
+            self.repo_owner = github_repo.get("owner", "ThorstenMuellerEE")
+            self.repo_name = github_repo.get("name", "th-pico2w_elmo")
             self.branch = github_repo.get("branch", "main")
 
             # Update URLs with new config
