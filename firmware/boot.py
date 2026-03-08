@@ -7,13 +7,14 @@ Provides early error detection and LED feedback
 import sys
 import time
 import machine
-from machine import Led, Pin
+from machine import Pin
 
 # ═══════════════════════════════════════════════════════════
 # LED STATUS OUTPUT (for headless operation)
 # ═══════════════════════════════════════════════════════════
 try:
-    status_led = Led("LED")  # Built-in LED on Pico W
+    status_led = Pin("LED")  # Built-in LED on Pico W
+    status_led.init(Pin.OUT)  # Set as output
 except Exception:
     status_led = None
 
