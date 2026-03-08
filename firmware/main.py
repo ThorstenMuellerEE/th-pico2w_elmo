@@ -126,6 +126,17 @@ try:
     DS_ROMS = ds.scan()
     log_info(f"Found {len(DS_ROMS)} DS18B20 sensors", "SENSOR")
     print(f"BOOT: DS18B20 initialization successful - found {len(DS_ROMS)} sensors")
+    
+    # Log discovered ROM addresses for diagnostics
+    if DS_ROMS:
+        for i, rom in enumerate(DS_ROMS):
+            rom_hex = rom.hex() if hasattr(rom, 'hex') else ''.join(f'{b:02x}' for b in rom)
+            print(f"BOOT:   Sensor {i}: {rom_hex}")
+            log_info(f"Discovered sensor {i}: {rom_hex}", "SENSOR")
+    else:
+        print("BOOT WARNING: OneWire initialized but no sensors found on bus")
+        log_warn("OneWire initialized but no sensors found on bus", "SENSOR")
+        
 except Exception as e:
     # Sensor initialization failed - continue without sensors
     print(f"BOOT WARNING: DS18B20 sensor init failed: {e}")
@@ -133,11 +144,21 @@ except Exception as e:
     ds = None
     DS_ROMS = []
 
+# Known sensor ROM mappings (update with actual addresses from boot log)
 DS_LABELS = {
     b'\x28\x40\x43\xef\x80\x10\x00\x76': "air",
     b'\x28\x40\x6c\xa6\xc8\x0f\x00\x75': "lamp",
     b'\x28\x40\x74\x00\x7b\x00\x00\x66': "water",
 }
+
+# Build dynamic labels for any discovered sensors not in DS_LABELS
+DS_ROMS_TO_LABELS = {}
+for i, rom in enumerate(DS_ROMS):
+    if rom in DS_LABELS:
+        DS_ROMS_TO_LABELS[rom] = DS_LABELS[rom]
+    else:
+        # Use generic name if ROM not recognized
+        DS_ROMS_TO_LABELS[rom] = f"sensor_{i}"
 
 # ───────────────────────── OTA UPDATER ─────────────────────────
 ota_updater = None
@@ -307,10 +328,12 @@ async def sensor_task():
                         temp = ds.read_temp(rom)
                         if temp is None:
                             continue
-                        label = DS_LABELS.get(rom, "unknown")
+                        # Use dynamic label mapping built during initialization
+                        label = DS_ROMS_TO_LABELS.get(rom, "unknown")
                         temps[label] = round(temp, 2)
                     except Exception as e:
-                        log_error(f"Error reading sensor {rom}: {e}", "SENSOR")
+                        rom_hex = rom.hex() if hasattr(rom, 'hex') else ''.join(f'{b:02x}' for b in rom)
+                        log_error(f"Error reading sensor {rom_hex}: {e}", "SENSOR")
                         continue
 
                 temps["internal"] = round(read_internal_temperature(), 2)
@@ -432,14 +455,17 @@ def format_metrics():
 
     metrics = []
 
+    # Format all temperatures with proper metric naming
     for name, value in temperatures.items():
-        metric = f"pico_temperature_{name}"
+        # Create sanitized metric name (replace underscores, ensure valid Prometheus name)
+        metric_name = f"pico_temperature_{name}"
         metrics.extend([
-            f"# HELP {metric} Temperature in Celsius",
-            f"# TYPE {metric} gauge",
-            f"{metric}{labels} {value}",
+            f"# HELP {metric_name} Temperature in Celsius",
+            f"# TYPE {metric_name} gauge",
+            f"{metric_name}{labels} {value}",
         ])
 
+    # Add uptime metric
     uptime = time.ticks_diff(time.ticks_ms(), boot_ticks) // 1000
     metrics.extend([
         "# HELP pico_uptime_seconds Device uptime",
