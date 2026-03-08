@@ -36,8 +36,21 @@ async def ota_task():
                     raise RuntimeError("Apply failed")
 
                 log_info("OTA successful, rebooting in 2s", "OTA")
+                
+                # Create reboot marker before reset
+                try:
+                    with open("ota_reboot_marker.txt", "w") as f:
+                        import time
+                        f.write(str(time.time()))
+                    log_info("OTA reboot marker created", "OTA")
+                except Exception as e:
+                    log_warn(f"Could not create reboot marker: {e}", "OTA")
+                
                 await asyncio.sleep(2)
-
+                
+                gc.collect()
+                await asyncio.sleep(0.5)  # Small delay to ensure filesystem operations complete
+                
                 import machine
                 machine.reset()
 

@@ -93,28 +93,51 @@ wlan.active(True)
 
 async def wifi_connect():
     log_info("Connecting to WiFi...", "NETWORK")
+    print(f"DEBUG: Attempting to connect to SSID: {wifi_secrets['ssid']}")
     wlan.connect(wifi_secrets["ssid"], wifi_secrets["pw"])
 
-    for _ in range(20):
-        if wlan.status() == 3:
-            log_info(f"WiFi connected: {wlan.ifconfig()[0]}", "NETWORK")
+    # Timeout after 25 seconds with better diagnostics
+    timeout_seconds = 25
+    for attempt in range(timeout_seconds):
+        current_status = wlan.status()
+        if current_status == 3:  # 3 = connected
+            ip_addr = wlan.ifconfig()[0]
+            log_info(f"WiFi connected: {ip_addr}", "NETWORK")
+            print(f"BOOT: WiFi connected after {attempt} seconds")
             return
+        elif attempt % 5 == 0:  # Log every 5 seconds
+            print(f"BOOT: WiFi status: {current_status} (attempt {attempt}/{timeout_seconds})")
         await asyncio.sleep(1)
 
-    raise RuntimeError("WiFi connection failed")
+    # WiFi connection failed - log details for debugging
+    final_status = wlan.status()
+    error_msg = f"WiFi connection failed after {timeout_seconds}s. Status code: {final_status}"
+    print(f"BOOT ERROR: {error_msg}")
+    log_error(error_msg, "NETWORK")
+    raise RuntimeError(error_msg)
 
 # ───────────────────────── DS18B20 ─────────────────────────
+# NOTE: GPIO pin is hardcoded as GPIO 4 (not using config.py pin value)
+# If you need to change this, update the value below and in boot.py
 DS_PIN = Pin(4)
-ds = ds18x20.DS18X20(onewire.OneWire(DS_PIN))
-DS_ROMS = ds.scan()
+
+try:
+    ds = ds18x20.DS18X20(onewire.OneWire(DS_PIN))
+    DS_ROMS = ds.scan()
+    log_info(f"Found {len(DS_ROMS)} DS18B20 sensors", "SENSOR")
+    print(f"BOOT: DS18B20 initialization successful - found {len(DS_ROMS)} sensors")
+except Exception as e:
+    # Sensor initialization failed - continue without sensors
+    print(f"BOOT WARNING: DS18B20 sensor init failed: {e}")
+    log_warn(f"DS18B20 sensor initialization failed: {e}", "SENSOR")
+    ds = None
+    DS_ROMS = []
 
 DS_LABELS = {
     b'\x28\x40\x43\xef\x80\x10\x00\x76': "air",
     b'\x28\x40\x6c\xa6\xc8\x0f\x00\x75': "lamp",
     b'\x28\x40\x74\x00\x7b\x00\x00\x66': "water",
 }
-
-log_info(f"Found {len(DS_ROMS)} DS18B20 sensors", "SENSOR")
 
 # ───────────────────────── OTA UPDATER ─────────────────────────
 ota_updater = None
@@ -137,6 +160,7 @@ def check_update_flag_and_rollback():
     - Timeout-based rollback if device becomes unresponsive
     - Clearer logging and error handling
     """
+    print("BOOT: Checking update flag...")
     try:
         # Check if update flag exists
         try:
@@ -148,9 +172,11 @@ def check_update_flag_and_rollback():
             update_was_attempted = False
         
         if not update_was_attempted:
+            print("BOOT: No update flag - normal boot")
             log_info("No update flag found - normal boot", "OTA")
             return False
         
+        print("BOOT: Update flag found - checking boot status...")
         log_warn("Update flag found - checking boot status...", "OTA")
         print("BOOT: Update flag detected - verifying network connectivity...")
         
@@ -166,22 +192,27 @@ def check_update_flag_and_rollback():
             if status == 3:
                 network_ready = True
                 ip = wlan.ifconfig()[0]
-                log_info(f"Network connected after update: {ip}", "OTA")
                 print(f"BOOT: Network connected after update: {ip}")
+                log_info(f"Network connected after update: {ip}", "OTA")
                 break
             elif status == 1:  # WL_CONNECTED but no IP yet
+                print(f"BOOT: WiFi connected, waiting for IP... ({i+1}/{max_wait//wait_interval})")
                 log_debug(f"WiFi connected, waiting for IP... ({i+1}/{max_wait//wait_interval})", "OTA")
             elif status == 2:  # WL_NO_AP_FOUND
+                print(f"BOOT: No AP found, retrying... ({i+1}/{max_wait//wait_interval})")
                 log_warn(f"No AP found, retrying... ({i+1}/{max_wait//wait_interval})", "OTA")
             elif status == -1:  # WL_CONNECT_FAILED
+                print("BOOT: WiFi connection failed!")
                 log_error("WiFi connection failed!", "OTA")
                 break
             else:
+                print(f"BOOT: Waiting for network... status={status} ({i+1}/{max_wait//wait_interval})")
                 log_debug(f"Waiting for network... status={status} ({i+1}/{max_wait//wait_interval})", "OTA")
             
             time.sleep(wait_interval)
         
         if not network_ready:
+            print("BOOT: Network not available - initiating rollback!")
             log_error("Network not available after update - initiating rollback!", "OTA")
             print("BOOT: Network failed - rolling back from backup files...")
             
@@ -189,6 +220,7 @@ def check_update_flag_and_rollback():
             if ota_updater:
                 rollback_success = ota_updater.rollback_update()
                 if rollback_success:
+                    print("BOOT: Rollback completed - rebooting...")
                     log_info("Rollback completed successfully - rebooting...", "OTA")
                     print("BOOT: Rollback completed - rebooting...")
                     
@@ -202,9 +234,10 @@ def check_update_flag_and_rollback():
                     time.sleep(1)
                     machine.reset()
                 else:
-                    log_error("Rollback failed!", "OTA")
                     print("BOOT: Rollback FAILED!")
+                    log_error("Rollback failed!", "OTA")
             else:
+                print("BOOT: OTA updater not available for rollback!")
                 log_error("OTA updater not available for rollback!", "OTA")
             
             # If we get here, rollback failed - continue with normal boot
@@ -212,6 +245,7 @@ def check_update_flag_and_rollback():
         
         # Network is ready - verify HTTP server can start as final boot verification
         # This ensures the new firmware actually works, not just network
+        print("BOOT: Network ready - verifying firmware functionality...")
         log_info("Network ready - verifying firmware functionality...", "OTA")
         print("BOOT: Verifying firmware functionality...")
         
@@ -227,8 +261,10 @@ def check_update_flag_and_rollback():
                 except Exception as module_err:
                     log_warn(f"Module {module_name} import warning: {module_err}", "OTA")
                     # Don't fail on warning, just log it
+            print("BOOT: Firmware verification complete")
             log_info("Firmware verification complete", "OTA")
         except Exception as verify_err:
+            print(f"BOOT: Firmware verification warning: {verify_err}")
             log_warn(f"Firmware verification warning: {verify_err}", "OTA")
             # Continue anyway - network is up
         
@@ -236,13 +272,15 @@ def check_update_flag_and_rollback():
         if ota_updater:
             ota_updater.clear_update_flag()
         
+        print("BOOT: Update verified successful - flag cleared")
         log_info("Update flag cleared - boot successful", "OTA")
         print("BOOT: Update verified successful - flag cleared")
         return True
         
     except Exception as e:
-        log_error(f"Update flag check failed: {e}", "OTA")
         print(f"BOOT: Update flag check error: {e}")
+        log_error(f"Update flag check failed: {e}", "OTA")
+        print(f"BOOT: Update flag check failed: {e}")
         return False
 
 # ───────────────────────── SHARED STATE ─────────────────────────
@@ -258,22 +296,32 @@ async def sensor_task():
 
     while True:
         try:
-            ds.convert_temp()
-            await asyncio.sleep_ms(750)
+            # Only attempt sensor reading if DS18B20 is initialized
+            if ds is not None and DS_ROMS:
+                ds.convert_temp()
+                await asyncio.sleep_ms(750)
 
-            temps = {}
-            for rom in DS_ROMS:
-                temp = ds.read_temp(rom)
-                if temp is None:
-                    continue
-                label = DS_LABELS.get(rom, "unknown")
-                temps[label] = round(temp, 2)
+                temps = {}
+                for rom in DS_ROMS:
+                    try:
+                        temp = ds.read_temp(rom)
+                        if temp is None:
+                            continue
+                        label = DS_LABELS.get(rom, "unknown")
+                        temps[label] = round(temp, 2)
+                    except Exception as e:
+                        log_error(f"Error reading sensor {rom}: {e}", "SENSOR")
+                        continue
 
-            temps["internal"] = round(read_internal_temperature(), 2)
-            temperatures = temps
+                temps["internal"] = round(read_internal_temperature(), 2)
+                temperatures = temps
+            else:
+                # Sensors not available - just read internal temperature
+                temperatures = {"internal": round(read_internal_temperature(), 2)}
 
         except Exception as e:
-            log_error(f"Sensor error: {e}", "SENSOR")
+            log_error(f"Sensor task error: {e}", "SENSOR")
+            temperatures = {}  # Clear on error
 
         await asyncio.sleep(5)
 
@@ -337,10 +385,24 @@ async def ota_task():
 
                     print("OTA: Update successful! Rebooting in 2 seconds...")
                     log_info("OTA successful, rebooting in 2s", "OTA")
+                    
+                    # Create a reboot marker file to track OTA-initiated reboots
+                    try:
+                        with open("ota_reboot_marker.txt", "w") as f:
+                            f.write(str(time.time()))  # Store timestamp
+                        print("OTA: Created reboot marker file")
+                    except Exception as marker_err:
+                        print(f"OTA: Warning - could not create reboot marker: {marker_err}")
+                    
                     await asyncio.sleep(2)
 
-                    print("OTA: Initiating hard reset...")
+                    print("OTA: Flushing file system and initiating reset...")
+                    log_info("OTA reset initiated", "OTA")
                     gc.collect()
+                    
+                    # Small delay to ensure file system operations complete
+                    await asyncio.sleep(0.5)
+                    
                     try:
                         machine.reset()
                     except Exception as reset_error:
@@ -566,17 +628,52 @@ async def http_server():
 # ───────────────────────── MAIN ─────────────────────────
 async def main():
     gc.collect()
+    
+    # Check if this is an OTA-initiated reboot and handle appropriately
+    ota_reboot_detected = False
+    try:
+        with open("ota_reboot_marker.txt", "r") as f:
+            reboot_time = f.read()
+            ota_reboot_detected = True
+            print(f"BOOT: OTA reboot detected from timestamp {reboot_time}")
+            # Remove the marker file after reading
+            import os
+            os.remove("ota_reboot_marker.txt")
+            print("BOOT: OTA reboot marker cleared")
+    except OSError:
+        # No marker file - normal boot
+        pass
+    except Exception as e:
+        print(f"BOOT: Warning - could not check OTA reboot marker: {e}")
+    
+    # If this is an OTA reboot, give extra time for filesystem to stabilize
+    if ota_reboot_detected:
+        print("BOOT: Waiting for filesystem to stabilize after OTA update...")
+        await asyncio.sleep(1)
+    
+    print("BOOT: Starting WiFi connection...")
     await wifi_connect()
+    print("BOOT: WiFi connected, checking update status...")
     
     # After WiFi is connected, check if an update was attempted and verify boot success
     # This will rollback if the device didn't come online after the update
     check_update_flag_and_rollback()
+    
+    print("BOOT: Update check complete, starting services...")
 
-#    init_ota()
-
+    # Start sensor and OTA tasks
     asyncio.create_task(sensor_task())
     asyncio.create_task(ota_task())
-    await http_server()
+    
+    print("BOOT: Starting HTTP server...")
+    
+    # Start HTTP server with error handling
+    try:
+        await http_server()
+    except Exception as server_err:
+        print(f"BOOT: HTTP server error: {server_err}")
+        log_error(f"HTTP server failed to start: {server_err}", "SYSTEM")
+        # Don't exit - let the device continue running for diagnostics
 
 
 

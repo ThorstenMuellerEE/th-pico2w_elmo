@@ -762,8 +762,19 @@ class GitHubOTAUpdater:
 
             # Flag remains set - device will boot into new firmware
             # If boot fails, main.py will detect flag and rollback
-            log_info("Update completed, restarting...", "OTA")
+            log_info("Update completed, preparing restart...", "OTA")
+            
+            # Create reboot marker before reset
+            try:
+                with open("ota_reboot_marker.txt", "w") as f:
+                    import time
+                    f.write(str(time.time()))
+                log_info("OTA reboot marker created", "OTA")
+            except Exception as e:
+                log_warn(f"Could not create reboot marker: {e}", "OTA")
+            
             gc.collect()
+            time.sleep(1)  # Small delay to ensure filesystem operations complete
             machine.reset()
 
         except Exception as e:
