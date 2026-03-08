@@ -117,9 +117,9 @@ async def wifi_connect():
     raise RuntimeError(error_msg)
 
 # ───────────────────────── DS18B20 ─────────────────────────
-# NOTE: GPIO pin is hardcoded as GPIO 4 (not using config.py pin value)
+# NOTE: GPIO pin is hardcoded as GPIO 22 (not using config.py pin value)
 # If you need to change this, update the value below and in boot.py
-DS_PIN = Pin(4)
+DS_PIN = Pin(22)
 
 try:
     ds = ds18x20.DS18X20(onewire.OneWire(DS_PIN))

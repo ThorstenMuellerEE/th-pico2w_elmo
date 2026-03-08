@@ -96,9 +96,9 @@ except ImportError as e:
 # ═══════════════════════════════════════════════════════════
 print("BOOT: Checking GPIO pins...")
 try:
-    # Check DS18B20 pin (should be GPIO 4 based on main.py)
-    ds_pin = Pin(4, Pin.IN)
-    print("BOOT: DS18B20 GPIO 4 - OK")
+    # Check DS18B20 pin (should be GPIO 22 based on main.py)
+    ds_pin = Pin(22, Pin.IN)
+    print("BOOT: DS18B20 GPIO 22 - OK")
     
     # Check if pull-up is needed
     pin_state = ds_pin.value()
